@@ -69,11 +69,11 @@ USER nonroot
 WORKDIR /app
 
 # Copy built application from builder
+# Note: dist/ already contains control-ui/ (UI build output from vite)
 COPY --from=builder --chown=nonroot:nonroot /app/dist ./dist
 COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
 COPY --from=builder --chown=nonroot:nonroot /app/package.json ./package.json
 COPY --from=builder --chown=nonroot:nonroot /app/openclaw.mjs ./openclaw.mjs
-COPY --from=builder --chown=nonroot:nonroot /app/ui/dist ./ui/dist
 
 # Copy gogcli binary
 COPY --from=builder /usr/local/bin/gog /usr/local/bin/gog
