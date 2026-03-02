@@ -6,7 +6,7 @@
 #   docker build -f Dockerfile.chainguard --build-arg OPENCLAW_INSTALL_BROWSER=1 -t ghcr.io/yourclaw/openclaw:latest-browser .
 #
 # Run:
-#   docker run -v ~/.openclaw:/home/nonroot/.openclaw ghcr.io/yourclaw/openclaw:latest
+#   docker run -v ~/.openclaw:/home/node/.openclaw ghcr.io/yourclaw/openclaw:latest
 
 # --- Stage 1: Build ---
 FROM cgr.dev/chainguard/node:latest-dev AS builder
@@ -62,24 +62,25 @@ RUN apk add --no-cache go && \
 # --- Stage 2: Production ---
 FROM cgr.dev/chainguard/node:latest
 
-# Security: Run as non-root (uid 65532 = nonroot in Chainguard)
-# This is the default in Chainguard images but we're explicit
-USER nonroot
+# Security: Run as non-root (uid 65532 in Chainguard)
+# The minimal (non-dev) image uses 'node' as the default user.
+# We use numeric UID for portability across Chainguard image variants.
+USER 65532
 
 WORKDIR /app
 
 # Copy built application from builder
 # Note: dist/ already contains control-ui/ (UI build output from vite)
-COPY --from=builder --chown=nonroot:nonroot /app/dist ./dist
-COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
-COPY --from=builder --chown=nonroot:nonroot /app/package.json ./package.json
-COPY --from=builder --chown=nonroot:nonroot /app/openclaw.mjs ./openclaw.mjs
+COPY --from=builder --chown=65532:65532 /app/dist ./dist
+COPY --from=builder --chown=65532:65532 /app/node_modules ./node_modules
+COPY --from=builder --chown=65532:65532 /app/package.json ./package.json
+COPY --from=builder --chown=65532:65532 /app/openclaw.mjs ./openclaw.mjs
 
 # Copy gogcli binary
 COPY --from=builder /usr/local/bin/gog /usr/local/bin/gog
 
 # Copy YourClaw security defaults
-COPY --from=builder --chown=nonroot:nonroot /app/yourclaw-patches/security-defaults.json /app/yourclaw-security-defaults.json
+COPY --from=builder --chown=65532:65532 /app/yourclaw-patches/security-defaults.json /app/yourclaw-security-defaults.json
 
 # Optionally install Chromium for browser automation
 # Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
@@ -88,13 +89,13 @@ ARG OPENCLAW_INSTALL_BROWSER=""
 RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
       apk update && apk add --no-cache chromium; \
     fi
-USER nonroot
+USER 65532
 
 ENV NODE_ENV=production
-ENV HOME=/home/nonroot
+ENV HOME=/home/node
 
 # Create state directory
-RUN mkdir -p /home/nonroot/.openclaw
+RUN mkdir -p /home/node/.openclaw
 
 # Bind to loopback by default for security
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
