@@ -231,13 +231,16 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      workflows: write
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           ref: ${{ env.FORK_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # PAT required to push workflow file changes from upstream.
+          # Falls back to GITHUB_TOKEN (which strips workflow files instead).
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Configure git
         run: |
@@ -266,6 +269,10 @@ jobs:
           if git merge "${NEW_TAG}" --no-edit -m "sync: merge upstream ${NEW_TAG} into yourclaw"; then
             echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
           else
+            # Resolve conflicts by preferring ours for upstream workflow files
+            # (GITHUB_TOKEN cannot push workflow changes — remove upstream's)
+            git checkout --ours .github/workflows/ 2>/dev/null || true
+            git add .github/workflows/ 2>/dev/null || true
             # Resolve conflicts by preferring ours for yourclaw-patches/ and workflows
             git checkout --ours yourclaw-patches/ .github/workflows/upstream-sync.yml .github/workflows/release.yml Dockerfile.chainguard 2>/dev/null || true
             git add yourclaw-patches/ .github/workflows/upstream-sync.yml .github/workflows/release.yml Dockerfile.chainguard 2>/dev/null || true
@@ -284,6 +291,17 @@ jobs:
               echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
             fi
           fi
+
+          # Remove upstream workflow files that conflict with GITHUB_TOKEN permissions.
+          # The default GITHUB_TOKEN cannot push changes to .github/workflows/ files
+          # that come from upstream. We keep only our own workflows.
+          for f in .github/workflows/*.yml; do
+            case "$(basename "$f")" in
+              upstream-sync.yml|release.yml) ;; # keep ours
+              *) git rm -f "$f" 2>/dev/null || true ;;
+            esac
+          done
+          git commit -m "chore: remove upstream workflow files (GITHUB_TOKEN limitation)" --allow-empty 2>/dev/null || true
 
           # Update LAST_SYNCED_TAG
           echo "${NEW_TAG}" > yourclaw-patches/LAST_SYNCED_TAG
