@@ -387,17 +387,16 @@ jobs:
             exit 0
           fi
 
-          # Generate HMAC signature
-          PAYLOAD=$(cat <<JSONEOF
-          {
-            "version": "${VERSION}",
-            "upstreamTag": "${UPSTREAM_TAG}",
-            "npmPackage": "@yourclaw/openclaw@${VERSION}",
-            "dockerImage": "ghcr.io/yourclaw/openclaw:${VERSION}",
-            "releasedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          JSONEOF
-          )
+          # Build compact JSON payload — must match what the backend
+          # produces via JSON.stringify(req.body) for HMAC verification.
+          RELEASED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          PAYLOAD=$(jq -cn \
+            --arg v "$VERSION" \
+            --arg ut "$UPSTREAM_TAG" \
+            --arg npm "@yourclaw/openclaw@${VERSION}" \
+            --arg img "ghcr.io/yourclaw/openclaw:${VERSION}" \
+            --arg ra "$RELEASED_AT" \
+            '{version:$v,upstreamTag:$ut,npmPackage:$npm,dockerImage:$img,releasedAt:$ra}')
 
           SIGNATURE=$(echo -n "${PAYLOAD}" | openssl dgst -sha256 -hmac "${WEBHOOK_SECRET}" | awk '{print $2}')
 
