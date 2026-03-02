@@ -140,7 +140,18 @@ jobs:
           "
 
       - name: Publish to GitHub Packages
-        run: pnpm publish --no-git-checks --access restricted
+        run: |
+          set +e
+          OUTPUT=$(pnpm publish --no-git-checks --access restricted 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+          if [ $EXIT_CODE -ne 0 ]; then
+            if echo "$OUTPUT" | grep -q "Cannot publish over existing version"; then
+              echo "::warning::Version already published — skipping (idempotent)"
+              exit 0
+            fi
+            exit $EXIT_CODE
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
