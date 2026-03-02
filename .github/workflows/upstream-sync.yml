@@ -138,12 +138,17 @@ jobs:
           echo "Scanning commits in range: ${DIFF_RANGE}"
           echo ""
 
+          # Write diff to temp file to avoid SIGPIPE issues with large diffs.
+          # (588+ commits = huge diff; piping through head/grep triggers SIGPIPE
+          #  under set -o pipefail, causing exit 141)
+          DIFF_FILE=$(mktemp)
+          git diff "${DIFF_RANGE}" -- '*.ts' '*.js' '*.json' '*.yml' '*.yaml' > "${DIFF_FILE}" 2>/dev/null || true
+          echo "Diff size: $(wc -c < "${DIFF_FILE}") bytes"
+
           # ─── Part 1: Diff-based pattern matching (fast, always runs) ───
 
-          DIFF_CONTENT=$(git diff "${DIFF_RANGE}" -- '*.ts' '*.js' '*.json' '*.yml' '*.yaml' 2>/dev/null || echo "")
-
           # Pattern 1: Hardcoded credentials or API keys
-          CRED_MATCHES=$(echo "${DIFF_CONTENT}" | grep -iE '(api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*["\x27][A-Za-z0-9+/=]{20,}' 2>/dev/null | head -5 || true)
+          CRED_MATCHES=$(grep -iE '(api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*["\x27][A-Za-z0-9+/=]{20,}' "${DIFF_FILE}" 2>/dev/null | head -5 || true)
           if [ -n "${CRED_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ CREDENTIAL LEAK: Possible hardcoded credentials detected"
             SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${CRED_MATCHES}\n\`\`\`"
@@ -152,11 +157,10 @@ jobs:
           fi
 
           # Pattern 2: eval() or Function() constructor usage
-          EVAL_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\beval\s*(' 2>/dev/null | tail -1 || echo "0")
-          FUNC_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\bnew\s*Function\s*(' 2>/dev/null | tail -1 || echo "0")
-          EVAL_COUNT="${EVAL_COUNT:-0}"; FUNC_COUNT="${FUNC_COUNT:-0}"
+          EVAL_COUNT=$(grep -c '^\+.*\beval\s*(' "${DIFF_FILE}" 2>/dev/null || echo "0")
+          FUNC_COUNT=$(grep -c '^\+.*\bnew\s*Function\s*(' "${DIFF_FILE}" 2>/dev/null || echo "0")
           if [ "$EVAL_COUNT" -gt 0 ] 2>/dev/null || [ "$FUNC_COUNT" -gt 0 ] 2>/dev/null; then
-            EVAL_SAMPLES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(eval\s*\(|new\s*Function\s*\()' | head -5 || true)
+            EVAL_SAMPLES=$(grep -E '^\+.*(eval\s*\(|new\s*Function\s*\()' "${DIFF_FILE}" | head -5 || true)
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ CODE INJECTION: ${EVAL_COUNT} eval() and ${FUNC_COUNT} new Function() calls added"
             SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${EVAL_SAMPLES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
@@ -164,7 +168,7 @@ jobs:
           fi
 
           # Pattern 3: Suspicious network calls (data exfiltration)
-          NETWORK_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*fetch\s*\(\s*["\x27]https?://' | grep -iv 'localhost\|127\.0\.0\.1\|github\.com\|npmjs\|googleapis' | head -5 || true)
+          NETWORK_MATCHES=$(grep -E '^\+.*fetch\s*\(\s*["\x27]https?://' "${DIFF_FILE}" | grep -iv 'localhost\|127\.0\.0\.1\|github\.com\|npmjs\|googleapis' | head -5 || true)
           if [ -n "${NETWORK_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ NETWORK: New external HTTP calls detected — review for data exfiltration"
             SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${NETWORK_MATCHES}\n\`\`\`"
@@ -173,15 +177,18 @@ jobs:
           fi
 
           # Pattern 4: Dependency changes (supply chain risk)
-          if git diff "${DIFF_RANGE}" -- 'package.json' 'pnpm-lock.yaml' | grep -q '^\+'; then
-            DEPS_ADDED=$(git diff "${DIFF_RANGE}" -- 'package.json' | grep '^\+.*"[^"]*":' | grep -v '^\+\+\+' | wc -l || echo "0")
-            DEPS_SAMPLES=$(git diff "${DIFF_RANGE}" -- 'package.json' | grep '^\+.*"[^"]*":' | grep -v '^\+\+\+' | head -10 || true)
+          DEP_DIFF_FILE=$(mktemp)
+          git diff "${DIFF_RANGE}" -- 'package.json' 'pnpm-lock.yaml' > "${DEP_DIFF_FILE}" 2>/dev/null || true
+          if grep -q '^\+' "${DEP_DIFF_FILE}" 2>/dev/null; then
+            DEPS_ADDED=$(grep '^\+.*"[^"]*":' "${DEP_DIFF_FILE}" | grep -v '^\+\+\+' | wc -l || echo "0")
+            DEPS_SAMPLES=$(grep '^\+.*"[^"]*":' "${DEP_DIFF_FILE}" | grep -v '^\+\+\+' | head -10 || true)
             SCAN_REPORT="${SCAN_REPORT}\nℹ️ SUPPLY CHAIN: ${DEPS_ADDED} dependency changes detected — manual review recommended"
             SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${DEPS_SAMPLES}\n\`\`\`"
           fi
+          rm -f "${DEP_DIFF_FILE}"
 
           # Pattern 5: Shell command injection vectors
-          EXEC_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(child_process|execSync|spawn\()' | head -5 || true)
+          EXEC_MATCHES=$(grep -E '^\+.*(child_process|execSync|spawn\()' "${DIFF_FILE}" | head -5 || true)
           if [ -n "${EXEC_MATCHES}" ]; then
             EXEC_COUNT=$(echo "${EXEC_MATCHES}" | wc -l | tr -d ' ')
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ COMMAND EXEC: ${EXEC_COUNT} new shell execution calls added"
@@ -191,13 +198,15 @@ jobs:
           fi
 
           # Pattern 6: Filesystem access outside workspace
-          FS_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(\/etc\/|\/root\/|\/home\/|process\.env\.HOME)' | head -5 || true)
+          FS_MATCHES=$(grep -E '^\+.*(\/etc\/|\/root\/|\/home\/|process\.env\.HOME)' "${DIFF_FILE}" | head -5 || true)
           if [ -n "${FS_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ FS ACCESS: Possible filesystem access outside workspace boundaries"
             SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${FS_MATCHES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
             echo "::warning::Filesystem access outside workspace detected"
           fi
+
+          rm -f "${DIFF_FILE}"
 
           echo ""
           echo "=== Diff-based scan complete: ${ISSUES_FOUND} issues ==="
@@ -206,7 +215,14 @@ jobs:
           # ─── Part 2: ClawGuard scanner (deep analysis on changed .ts/.js files) ───
 
           echo "=== Running ClawGuard scanner on changed files ==="
-          CHANGED_FILES=$(git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' 2>/dev/null | head -50)
+          CHANGED_FILES_FILE=$(mktemp)
+          git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' > "${CHANGED_FILES_FILE}" 2>/dev/null || true
+          # Limit to first 50 files
+          CHANGED_FILES=$(head -50 "${CHANGED_FILES_FILE}")
+          TOTAL_CHANGED=$(wc -l < "${CHANGED_FILES_FILE}" | tr -d ' ')
+          rm -f "${CHANGED_FILES_FILE}"
+          echo "Files to scan: ${TOTAL_CHANGED} (scanning first 50)"
+
           CG_CRITICAL=0
           CG_HIGH=0
           CG_MEDIUM=0
@@ -217,11 +233,11 @@ jobs:
             echo "  Scanning: $f"
 
             # Run ClawGuard scanner via Node.js (builtinOnly to avoid needing semgrep/gitleaks in CI)
-            RESULT=$(node -e "
-              const { scanSkill, formatMarkdown } = require('@yourclaw/clawguard-scanner');
+            RESULT=$(NODE_PATH=/tmp/clawguard-runner/node_modules node -e "
+              const { scanSkill } = require('@yourclaw/clawguard-scanner');
               (async () => {
                 try {
-                  const report = await scanSkill('$(pwd)/${f}', { builtinOnly: true, skipAI: true });
+                  const report = await scanSkill(process.argv[1], { builtinOnly: true, skipAI: true });
                   const counts = report.score;
                   console.log(JSON.stringify({
                     status: report.status,
@@ -234,14 +250,14 @@ jobs:
                       severity: f.severity,
                       name: f.name,
                       message: f.message,
-                      filePath: f.filePath || '${f}'
+                      filePath: f.filePath || process.argv[1]
                     }))
                   }));
                 } catch (e) {
                   console.log(JSON.stringify({ status: 'error', error: e.message }));
                 }
               })();
-            " --require /tmp/clawguard-runner/node_modules/@yourclaw/clawguard-scanner 2>/dev/null || echo '{"status":"error","error":"scanner crashed"}')
+            " "$(pwd)/${f}" 2>/dev/null || echo '{"status":"error","error":"scanner crashed"}')
 
             STATUS=$(echo "${RESULT}" | jq -r '.status // "error"' 2>/dev/null || echo "error")
             if [ "${STATUS}" = "error" ]; then
