@@ -229,16 +229,17 @@ jobs:
     needs: [check-upstream, clawguard-scan]
     if: needs.check-upstream.outputs.has_new_release == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
+    # Note: We use SYNC_PAT (a PAT with repo + workflow scopes) instead of GITHUB_TOKEN.
+    # Reason 1: The yourclaw org restricts GITHUB_TOKEN to read-only (org-level policy).
+    # Reason 2: GITHUB_TOKEN cannot push commits that modify .github/workflows/ files.
+    # A fine-grained PAT or classic PAT with repo+workflow scopes solves both.
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           ref: ${{ env.FORK_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_PAT }}
 
       - name: Configure git
         run: |
@@ -313,7 +314,7 @@ jobs:
 
       - name: Create Pull Request
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
           NEW_TAG: ${{ needs.check-upstream.outputs.new_tag }}
           LAST_TAG: ${{ needs.check-upstream.outputs.last_synced_tag }}
           COMMIT_COUNT: ${{ needs.check-upstream.outputs.commit_count }}
@@ -374,7 +375,7 @@ jobs:
       - name: Auto-merge if safe
         if: needs.clawguard-scan.outputs.scan_passed == 'true' && steps.merge.outputs.has_conflicts == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
           SYNC_BRANCH: ${{ steps.merge.outputs.sync_branch }}
         run: |
           PR_NUMBER=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
