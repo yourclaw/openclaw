@@ -1,0 +1,45 @@
+{
+  "id": "clawguard-registry",
+  "skills": ["clawguard_check_skill", "clawguard_search_skills", "clawguard_top_skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "registryUrl": {
+        "type": "string",
+        "description": "ClawGuard registry API base URL"
+      },
+      "enforceTrustScore": {
+        "type": "boolean",
+        "description": "Block skills below minimum trust score"
+      },
+      "minTrustScore": {
+        "type": "number",
+        "description": "Minimum trust score (0-100) for skill approval"
+      },
+      "preferRegistrySkills": {
+        "type": "boolean",
+        "description": "Prefer skills from the ClawGuard registry over unverified ones"
+      }
+    }
+  },
+  "uiHints": {
+    "registryUrl": {
+      "label": "Registry URL",
+      "placeholder": "https://api.clawguard.dev/v1",
+      "help": "ClawGuard trust registry API endpoint"
+    },
+    "enforceTrustScore": {
+      "label": "Enforce Trust Score",
+      "help": "When enabled, skills below the minimum trust score will be blocked"
+    },
+    "minTrustScore": {
+      "label": "Minimum Trust Score",
+      "help": "Skills with trust scores below this threshold will be warned about or blocked (0-100)"
+    },
+    "preferRegistrySkills": {
+      "label": "Prefer Registry Skills",
+      "help": "When enabled, skills from the ClawGuard registry are prioritized over unverified alternatives"
+    }
+  }
+}

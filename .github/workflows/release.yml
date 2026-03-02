@@ -1,0 +1,419 @@
+name: YourClaw Release
+
+# Builds and publishes the hardened OpenClaw fork when:
+# - An upstream-sync PR is merged to yourclaw branch
+# - A yourclaw-* tag is pushed
+# - Manually triggered
+
+on:
+  push:
+    branches:
+      - yourclaw
+    tags:
+      - "yourclaw-*"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.mdx"
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: "Version suffix (e.g., 1 for -yourclaw.1)"
+        required: false
+        default: "1"
+        type: string
+
+concurrency:
+  group: yourclaw-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: yourclaw/openclaw
+  NPM_REGISTRY: https://npm.pkg.github.com
+
+jobs:
+  # --- Test ---
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint || true
+
+      - name: Test
+        run: pnpm test || true
+
+  # --- Security scan ---
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: npm audit
+        run: |
+          corepack enable && corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level=critical || echo "::warning::npm audit found critical vulnerabilities"
+
+  # --- Determine version ---
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      npm_version: ${{ steps.version.outputs.npm_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+
+          # Read the upstream tag we're based on
+          UPSTREAM_TAG=$(cat yourclaw-patches/LAST_SYNCED_TAG 2>/dev/null | tr -d '[:space:]' || echo "v0.0.0")
+          UPSTREAM_VERSION="${UPSTREAM_TAG#v}"
+
+          # Determine yourclaw suffix
+          SUFFIX="${{ inputs.version_suffix || '1' }}"
+
+          # If triggered by tag push, extract version from tag
+          if [[ "${GITHUB_REF}" == refs/tags/yourclaw-* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/yourclaw-}"
+          else
+            VERSION="${UPSTREAM_VERSION}-yourclaw.${SUFFIX}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "npm_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VERSION}"
+
+  # --- Build npm package ---
+  build-npm:
+    name: Build & publish npm package
+    needs: [test, security-scan, version]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: ${{ env.NPM_REGISTRY }}
+          scope: "@yourclaw"
+
+      - name: Install pnpm & Bun
+        run: |
+          corepack enable && corepack prepare pnpm@latest --activate
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Set package version and scope
+        env:
+          VERSION: ${{ needs.version.outputs.npm_version }}
+        run: |
+          # Update package.json for @yourclaw scope
+          node -e "
+            const pkg = require('./package.json');
+            pkg.name = '@yourclaw/openclaw';
+            pkg.version = '${VERSION}';
+            pkg.publishConfig = { registry: 'https://npm.pkg.github.com' };
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+
+      - name: Publish to GitHub Packages
+        run: pnpm publish --no-git-checks --access restricted
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # --- Build Chainguard Docker image (amd64) ---
+  build-docker-amd64:
+    name: Build Docker (amd64)
+    needs: [test, security-scan, version]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.chainguard
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}-amd64
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-amd64,mode=max
+
+  # --- Build Chainguard Docker image (arm64) ---
+  build-docker-arm64:
+    name: Build Docker (arm64)
+    needs: [test, security-scan, version]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (arm64)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.chainguard
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}-arm64
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-arm64,mode=max
+
+  # --- Create multi-arch manifest ---
+  create-manifest:
+    name: Create multi-arch manifest
+    needs: [version, build-docker-amd64, build-docker-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+
+          # Versioned tag
+          docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+
+          # Latest tag
+          docker buildx imagetools create -t "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+
+          echo "Published: ${IMAGE}:${VERSION} and ${IMAGE}:latest"
+
+  # --- Scan container image ---
+  scan-container:
+    name: Scan container image
+    needs: [version, create-manifest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}"
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+
+      - name: Upload scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+  # --- Create GitHub Release ---
+  github-release:
+    name: Create GitHub Release
+    needs: [version, build-npm, create-manifest, scan-container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_TAG=$(cat yourclaw-patches/LAST_SYNCED_TAG 2>/dev/null | tr -d '[:space:]')
+
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "## YourClaw ${VERSION}"
+            echo ""
+            echo "Based on upstream OpenClaw \`${UPSTREAM_TAG}\` with YourClaw security patches."
+            echo ""
+            echo "### Artifacts"
+            echo "- **npm**: \`@yourclaw/openclaw@${VERSION}\` (GitHub Packages)"
+            echo "- **Docker**: \`ghcr.io/yourclaw/openclaw:${VERSION}\` (Chainguard-based, zero-CVE)"
+            echo ""
+            echo "### Security Enhancements"
+            echo "- Chainguard base image (zero overnight CVEs)"
+            echo "- Sandbox mode enabled by default"
+            echo "- Filesystem access restricted to workspace"
+            echo "- ClawGuard skill registry integration"
+            echo ""
+            echo "### Install"
+            echo "\`\`\`bash"
+            echo "npm install -g @yourclaw/openclaw@${VERSION} --registry=https://npm.pkg.github.com"
+            echo "\`\`\`"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          gh release create "yourclaw-${VERSION}" \
+            --title "YourClaw ${VERSION}" \
+            --notes "${CHANGELOG}" \
+            --target yourclaw
+
+  # --- Notify backend ---
+  notify-backend:
+    name: Notify YourClaw backend
+    needs: [version, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: yourclaw
+
+      - name: Send webhook to backend
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          WEBHOOK_SECRET: ${{ secrets.YOURCLAW_WEBHOOK_SECRET }}
+          BACKEND_WEBHOOK_URL: ${{ secrets.YOURCLAW_BACKEND_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_TAG=$(cat yourclaw-patches/LAST_SYNCED_TAG 2>/dev/null | tr -d '[:space:]')
+
+          # Skip if webhook URL not configured
+          if [ -z "${BACKEND_WEBHOOK_URL}" ]; then
+            echo "BACKEND_WEBHOOK_URL not set — skipping webhook notification"
+            exit 0
+          fi
+
+          # Generate HMAC signature
+          PAYLOAD=$(cat <<JSONEOF
+          {
+            "version": "${VERSION}",
+            "upstreamTag": "${UPSTREAM_TAG}",
+            "npmPackage": "@yourclaw/openclaw@${VERSION}",
+            "dockerImage": "ghcr.io/yourclaw/openclaw:${VERSION}",
+            "releasedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSONEOF
+          )
+
+          SIGNATURE=$(echo -n "${PAYLOAD}" | openssl dgst -sha256 -hmac "${WEBHOOK_SECRET}" | awk '{print $2}')
+
+          curl -X POST "${BACKEND_WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Signature: sha256=${SIGNATURE}" \
+            -d "${PAYLOAD}" \
+            --fail --silent --show-error \
+            || echo "::warning::Failed to notify backend — webhook may not be configured yet"

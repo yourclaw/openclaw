@@ -1,0 +1,360 @@
+name: Upstream Sync
+
+# Checks nightly for new upstream OpenClaw release tags.
+# When found, scans each commit with ClawGuard, then creates a PR to merge into yourclaw branch.
+
+on:
+  schedule:
+    # Run at 02:00 UTC daily
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: "Force sync to a specific upstream tag (e.g., v2026.2.27)"
+        required: false
+        type: string
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/openclaw/openclaw.git
+  FORK_BRANCH: yourclaw
+
+jobs:
+  check-upstream:
+    name: Check for new upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      has_new_release: ${{ steps.check.outputs.has_new_release }}
+      new_tag: ${{ steps.check.outputs.new_tag }}
+      last_synced_tag: ${{ steps.check.outputs.last_synced_tag }}
+      commit_count: ${{ steps.check.outputs.commit_count }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: git remote add upstream ${{ env.UPSTREAM_REPO }}
+
+      - name: Fetch upstream tags
+        run: git fetch upstream --tags --force
+
+      - name: Check for new release tag
+        id: check
+        run: |
+          set -euo pipefail
+
+          # Read last synced tag
+          LAST_SYNCED=$(cat yourclaw-patches/LAST_SYNCED_TAG 2>/dev/null | tr -d '[:space:]' || echo "")
+          echo "last_synced_tag=${LAST_SYNCED}" >> "$GITHUB_OUTPUT"
+
+          # Use forced tag if provided
+          if [ -n "${{ inputs.force_tag }}" ]; then
+            NEW_TAG="${{ inputs.force_tag }}"
+            echo "Forced sync to tag: ${NEW_TAG}"
+          else
+            # Find latest stable upstream tag (exclude beta/rc)
+            NEW_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v -E '(beta|rc|alpha)' | head -1)
+          fi
+
+          echo "Latest upstream stable tag: ${NEW_TAG}"
+          echo "Last synced tag: ${LAST_SYNCED}"
+
+          if [ "${NEW_TAG}" = "${LAST_SYNCED}" ] && [ -z "${{ inputs.force_tag }}" ]; then
+            echo "Already up to date with ${NEW_TAG}"
+            echo "has_new_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Count commits between tags
+          if [ -n "${LAST_SYNCED}" ]; then
+            COMMIT_COUNT=$(git rev-list --count "${LAST_SYNCED}..${NEW_TAG}" 2>/dev/null || echo "0")
+          else
+            COMMIT_COUNT="unknown"
+          fi
+
+          echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "has_new_release=true" >> "$GITHUB_OUTPUT"
+          echo "commit_count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "New release found: ${NEW_TAG} (${COMMIT_COUNT} commits since ${LAST_SYNCED})"
+
+  clawguard-scan:
+    name: ClawGuard security scan
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_new_release == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      scan_passed: ${{ steps.scan.outputs.passed }}
+      scan_summary: ${{ steps.scan.outputs.summary }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Add upstream remote & fetch
+        run: |
+          git remote add upstream ${{ env.UPSTREAM_REPO }}
+          git fetch upstream --tags --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install ClawGuard scanner
+        run: |
+          # Install from the monorepo's clawguard-scanner
+          # In production, this would be: npm install -g @yourclaw/clawguard-scanner
+          npm install -g clawguard-scanner 2>/dev/null || echo "ClawGuard scanner not yet published — using diff-based scan"
+
+      - name: Scan commits between tags
+        id: scan
+        env:
+          LAST_TAG: ${{ needs.check-upstream.outputs.last_synced_tag }}
+          NEW_TAG: ${{ needs.check-upstream.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+
+          SCAN_REPORT=""
+          SCAN_PASSED=true
+          ISSUES_FOUND=0
+
+          # Get the diff between tags
+          if [ -n "${LAST_TAG}" ]; then
+            DIFF_RANGE="${LAST_TAG}..${NEW_TAG}"
+          else
+            # First sync — scan last 50 commits
+            DIFF_RANGE="$(git rev-list --max-count=50 ${NEW_TAG} | tail -1)..${NEW_TAG}"
+          fi
+
+          echo "Scanning commits in range: ${DIFF_RANGE}"
+
+          # Check for suspicious patterns in the diff
+          DIFF_CONTENT=$(git diff "${DIFF_RANGE}" -- '*.ts' '*.js' '*.json' '*.yml' '*.yaml' 2>/dev/null || echo "")
+
+          # Pattern 1: Hardcoded credentials or API keys
+          if echo "${DIFF_CONTENT}" | grep -iE '(api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*["\x27][A-Za-z0-9+/=]{20,}' > /dev/null 2>&1; then
+            SCAN_REPORT="${SCAN_REPORT}\n⚠️ CREDENTIAL LEAK: Possible hardcoded credentials detected"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+          fi
+
+          # Pattern 2: eval() or Function() constructor usage
+          EVAL_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\beval\s*(' 2>/dev/null || echo "0")
+          FUNC_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\bnew\s*Function\s*(' 2>/dev/null || echo "0")
+          if [ "$EVAL_COUNT" -gt 0 ] || [ "$FUNC_COUNT" -gt 0 ]; then
+            SCAN_REPORT="${SCAN_REPORT}\n⚠️ CODE INJECTION: ${EVAL_COUNT} eval() and ${FUNC_COUNT} new Function() calls added"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+          fi
+
+          # Pattern 3: Suspicious network calls (data exfiltration)
+          if echo "${DIFF_CONTENT}" | grep -E '^\+.*fetch\s*\(\s*["\x27]https?://' | grep -iv 'localhost\|127\.0\.0\.1\|github\.com\|npmjs\|googleapis' > /dev/null 2>&1; then
+            SCAN_REPORT="${SCAN_REPORT}\n⚠️ NETWORK: New external HTTP calls detected — review for data exfiltration"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+          fi
+
+          # Pattern 4: Dependency changes (supply chain risk)
+          if git diff "${DIFF_RANGE}" -- 'package.json' 'pnpm-lock.yaml' | grep -q '^\+'; then
+            DEPS_ADDED=$(git diff "${DIFF_RANGE}" -- 'package.json' | grep '^\+.*"[^"]*":' | grep -v '^\+\+\+' | wc -l || echo "0")
+            SCAN_REPORT="${SCAN_REPORT}\nℹ️ SUPPLY CHAIN: ${DEPS_ADDED} dependency changes detected — manual review recommended"
+            # Don't fail on dependency changes, just flag for review
+          fi
+
+          # Pattern 5: Shell command injection vectors
+          if echo "${DIFF_CONTENT}" | grep -E '^\+.*child_process|^\+.*execSync|^\+.*spawn\(' > /dev/null 2>&1; then
+            EXEC_COUNT=$(echo "${DIFF_CONTENT}" | grep -cE '^\+.*(child_process|execSync|spawn\()' 2>/dev/null || echo "0")
+            SCAN_REPORT="${SCAN_REPORT}\n⚠️ COMMAND EXEC: ${EXEC_COUNT} new shell execution calls added"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+          fi
+
+          # Pattern 6: Filesystem access outside workspace
+          if echo "${DIFF_CONTENT}" | grep -E '^\+.*(\/etc\/|\/root\/|\/home\/|process\.env\.HOME)' > /dev/null 2>&1; then
+            SCAN_REPORT="${SCAN_REPORT}\n⚠️ FS ACCESS: Possible filesystem access outside workspace boundaries"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+          fi
+
+          # Try ClawGuard scanner CLI if available
+          if command -v clawguard-scan &> /dev/null; then
+            echo "Running ClawGuard scanner..."
+            # Export changed files for scanning
+            CHANGED_FILES=$(git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' | head -100)
+            for f in ${CHANGED_FILES}; do
+              if [ -f "$f" ]; then
+                clawguard-scan "$f" >> /tmp/clawguard-results.txt 2>&1 || true
+              fi
+            done
+            if [ -f /tmp/clawguard-results.txt ]; then
+              CG_ISSUES=$(grep -c 'CRITICAL\|HIGH' /tmp/clawguard-results.txt 2>/dev/null || echo "0")
+              if [ "$CG_ISSUES" -gt 0 ]; then
+                SCAN_REPORT="${SCAN_REPORT}\n🔴 CLAWGUARD: ${CG_ISSUES} critical/high issues found by ClawGuard scanner"
+                ISSUES_FOUND=$((ISSUES_FOUND + CG_ISSUES))
+              fi
+            fi
+          fi
+
+          # Summary
+          if [ "${ISSUES_FOUND}" -gt 0 ]; then
+            SCAN_PASSED=false
+            SUMMARY="❌ ${ISSUES_FOUND} security issues found — manual review required"
+          else
+            SUMMARY="✅ No security issues detected"
+          fi
+
+          if [ -z "${SCAN_REPORT}" ]; then
+            SCAN_REPORT="No issues found in scanned commits."
+          fi
+
+          echo "passed=${SCAN_PASSED}" >> "$GITHUB_OUTPUT"
+
+          # Write summary to file (multiline output)
+          {
+            echo "summary<<CLAWGUARD_EOF"
+            echo -e "## ClawGuard Security Scan Report\n"
+            echo "**Range:** \`${DIFF_RANGE}\`"
+            echo "**Result:** ${SUMMARY}"
+            echo ""
+            echo -e "${SCAN_REPORT}"
+            echo "CLAWGUARD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  create-sync-pr:
+    name: Create sync PR
+    needs: [check-upstream, clawguard-scan]
+    if: needs.check-upstream.outputs.has_new_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "yourclaw-bot"
+          git config user.email "bot@yourclaw.dev"
+
+      - name: Add upstream & fetch
+        run: |
+          git remote add upstream ${{ env.UPSTREAM_REPO }}
+          git fetch upstream --tags --force
+
+      - name: Create sync branch and merge upstream tag
+        id: merge
+        env:
+          NEW_TAG: ${{ needs.check-upstream.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+
+          SYNC_BRANCH="upstream-sync/${NEW_TAG}"
+          echo "sync_branch=${SYNC_BRANCH}" >> "$GITHUB_OUTPUT"
+
+          # Create sync branch from yourclaw
+          git checkout -b "${SYNC_BRANCH}"
+
+          # Attempt merge
+          if git merge "${NEW_TAG}" --no-edit -m "sync: merge upstream ${NEW_TAG} into yourclaw"; then
+            echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
+          else
+            # Resolve conflicts by preferring ours for yourclaw-patches/ and workflows
+            git checkout --ours yourclaw-patches/ .github/workflows/upstream-sync.yml .github/workflows/release.yml Dockerfile.chainguard 2>/dev/null || true
+            git add yourclaw-patches/ .github/workflows/upstream-sync.yml .github/workflows/release.yml Dockerfile.chainguard 2>/dev/null || true
+
+            # Check if there are still unresolved conflicts
+            if git diff --name-only --diff-filter=U | head -1 | grep -q .; then
+              echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
+              echo "⚠️ Unresolved merge conflicts — manual intervention required"
+              # Abort merge so we can still push the branch for manual resolution
+              git merge --abort
+              # Push the branch as-is so maintainers can resolve manually
+              git push origin "${SYNC_BRANCH}" --force
+              exit 0
+            else
+              git commit --no-edit -m "sync: merge upstream ${NEW_TAG} (auto-resolved yourclaw patches)"
+              echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          # Update LAST_SYNCED_TAG
+          echo "${NEW_TAG}" > yourclaw-patches/LAST_SYNCED_TAG
+          git add yourclaw-patches/LAST_SYNCED_TAG
+          git commit -m "chore: update LAST_SYNCED_TAG to ${NEW_TAG}" || true
+
+          # Push sync branch
+          git push origin "${SYNC_BRANCH}" --force
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ needs.check-upstream.outputs.new_tag }}
+          LAST_TAG: ${{ needs.check-upstream.outputs.last_synced_tag }}
+          COMMIT_COUNT: ${{ needs.check-upstream.outputs.commit_count }}
+          SCAN_PASSED: ${{ needs.clawguard-scan.outputs.scan_passed }}
+          SCAN_SUMMARY: ${{ needs.clawguard-scan.outputs.scan_summary }}
+          HAS_CONFLICTS: ${{ steps.merge.outputs.has_conflicts }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.sync_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ "${SCAN_PASSED}" = "true" ] && [ "${HAS_CONFLICTS}" = "false" ]; then
+            LABEL="auto-merge"
+            TITLE="sync: upstream ${NEW_TAG} (auto-merge ready)"
+          else
+            LABEL="needs-review"
+            TITLE="sync: upstream ${NEW_TAG} (manual review required)"
+          fi
+
+          BODY=$(cat <<PREOF
+          ## Upstream Sync: ${LAST_TAG} → ${NEW_TAG}
+
+          **Commits:** ${COMMIT_COUNT}
+          **Conflicts:** ${HAS_CONFLICTS}
+          **Security Scan:** $([ "${SCAN_PASSED}" = "true" ] && echo "✅ Passed" || echo "❌ Issues found")
+
+          ${SCAN_SUMMARY}
+
+          ### Upstream Changes
+          \`\`\`
+          $(git log --oneline "${LAST_TAG}..${NEW_TAG}" 2>/dev/null | head -30 || echo "Unable to list commits")
+          \`\`\`
+
+          ---
+          🤖 Generated by [YourClaw Upstream Sync](https://github.com/yourclaw/openclaw/actions/workflows/upstream-sync.yml)
+          PREOF
+          )
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH} — updating"
+            gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body "${BODY}"
+          else
+            gh pr create \
+              --base "${FORK_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --title "${TITLE}" \
+              --body "${BODY}" \
+              --label "${LABEL}"
+          fi
+
+      - name: Auto-merge if safe
+        if: needs.clawguard-scan.outputs.scan_passed == 'true' && steps.merge.outputs.has_conflicts == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.sync_branch }}
+        run: |
+          PR_NUMBER=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
+          if [ -n "${PR_NUMBER}" ]; then
+            gh pr merge "${PR_NUMBER}" --squash --auto --delete-branch
+            echo "Auto-merge enabled for PR #${PR_NUMBER}"
+          fi

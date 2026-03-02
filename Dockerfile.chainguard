@@ -1,0 +1,97 @@
+# YourClaw hardened OpenClaw image based on Chainguard (zero-CVE base)
+# https://images.chainguard.dev/directory/image/node/overview
+#
+# Build:
+#   docker build -f Dockerfile.chainguard -t ghcr.io/yourclaw/openclaw:latest .
+#   docker build -f Dockerfile.chainguard --build-arg OPENCLAW_INSTALL_BROWSER=1 -t ghcr.io/yourclaw/openclaw:latest-browser .
+#
+# Run:
+#   docker run -v ~/.openclaw:/home/nonroot/.openclaw ghcr.io/yourclaw/openclaw:latest
+
+# --- Stage 1: Build ---
+FROM cgr.dev/chainguard/node:latest-dev AS builder
+
+USER root
+
+# Install build dependencies
+RUN apk update && apk add --no-cache \
+    bash \
+    git \
+    python3 \
+    make \
+    gcc \
+    g++ \
+    curl
+
+# Install Bun (required for build scripts)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Install pnpm via corepack
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy dependency manifests first for layer caching
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile
+
+# Copy source and build
+COPY . .
+RUN pnpm build
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
+
+# Prune dev dependencies for smaller production image
+RUN pnpm prune --prod
+
+# Build gogcli for Google Apps integration
+ARG GOG_VERSION='v0.11.0'
+RUN apk add --no-cache go && \
+    git clone https://github.com/steipete/gogcli.git -b ${GOG_VERSION} /gogcli && \
+    cd /gogcli && make BIN_DIR=/usr/local/bin/ && \
+    rm -rf /gogcli
+
+# --- Stage 2: Production ---
+FROM cgr.dev/chainguard/node:latest
+
+# Security: Run as non-root (uid 65532 = nonroot in Chainguard)
+# This is the default in Chainguard images but we're explicit
+USER nonroot
+
+WORKDIR /app
+
+# Copy built application from builder
+COPY --from=builder --chown=nonroot:nonroot /app/dist ./dist
+COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
+COPY --from=builder --chown=nonroot:nonroot /app/package.json ./package.json
+COPY --from=builder --chown=nonroot:nonroot /app/openclaw.mjs ./openclaw.mjs
+COPY --from=builder --chown=nonroot:nonroot /app/ui/dist ./ui/dist
+
+# Copy gogcli binary
+COPY --from=builder /usr/local/bin/gog /usr/local/bin/gog
+
+# Copy YourClaw security defaults
+COPY --from=builder --chown=nonroot:nonroot /app/yourclaw-patches/security-defaults.json /app/yourclaw-security-defaults.json
+
+# Optionally install Chromium for browser automation
+# Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
+USER root
+ARG OPENCLAW_INSTALL_BROWSER=""
+RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
+      apk update && apk add --no-cache chromium; \
+    fi
+USER nonroot
+
+ENV NODE_ENV=production
+ENV HOME=/home/nonroot
+
+# Create state directory
+RUN mkdir -p /home/nonroot/.openclaw
+
+# Bind to loopback by default for security
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

@@ -1,0 +1,29 @@
+{
+  "$schema": "Security configuration overlay applied to all YourClaw-managed instances",
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main"
+      }
+    }
+  },
+  "tools": {
+    "fs": {
+      "workspaceOnly": true
+    },
+    "exec": {
+      "applyPatch": {
+        "workspaceOnly": true
+      }
+    }
+  },
+  "gateway": {
+    "bind": "loopback"
+  },
+  "clawguard": {
+    "registryUrl": "https://api.clawguard.dev/v1",
+    "enforceTrustScore": true,
+    "minTrustScore": 70,
+    "preferRegistrySkills": true
+  }
+}
