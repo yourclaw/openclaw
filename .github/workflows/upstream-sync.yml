@@ -231,16 +231,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      workflows: write
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           ref: ${{ env.FORK_BRANCH }}
           fetch-depth: 0
-          # PAT required to push workflow file changes from upstream.
-          # Falls back to GITHUB_TOKEN (which strips workflow files instead).
-          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git
         run: |
