@@ -33,34 +33,9 @@ env:
   NPM_REGISTRY: https://npm.pkg.github.com
 
 jobs:
-  # --- Test ---
-  test:
-    name: Test suite
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: yourclaw
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install pnpm
-        run: corepack enable && corepack prepare pnpm@latest --activate
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Lint
-        run: pnpm lint || true
-
-      - name: Test
-        run: pnpm test || true
-
   # --- Security scan ---
+  # Note: upstream tests are not re-run here. We only sync upstream release tags,
+  # which have already passed upstream's full CI. Our gate is the security scan.
   security-scan:
     name: Security scan
     runs-on: ubuntu-latest
@@ -121,7 +96,7 @@ jobs:
   # --- Build npm package ---
   build-npm:
     name: Build & publish npm package
-    needs: [test, security-scan, version]
+    needs: [security-scan, version]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -172,7 +147,7 @@ jobs:
   # --- Build Chainguard Docker image (amd64) ---
   build-docker-amd64:
     name: Build Docker (amd64)
-    needs: [test, security-scan, version]
+    needs: [security-scan, version]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -211,7 +186,7 @@ jobs:
   # --- Build Chainguard Docker image (arm64) ---
   build-docker-arm64:
     name: Build Docker (arm64)
-    needs: [test, security-scan, version]
+    needs: [security-scan, version]
     runs-on: ubuntu-latest
     permissions:
       packages: write
