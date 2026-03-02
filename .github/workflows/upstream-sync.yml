@@ -108,12 +108,23 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install ClawGuard scanner
+      - name: Install ClawGuard scanner and security tools
         run: |
+          # Install ClawGuard scanner from npm
           mkdir -p /tmp/clawguard-runner && cd /tmp/clawguard-runner
           npm init -y > /dev/null 2>&1
           npm install @yourclaw/clawguard-scanner@latest
-          echo "✅ Installed @yourclaw/clawguard-scanner $(npm ls @yourclaw/clawguard-scanner --depth=0 2>/dev/null | grep clawguard)"
+          echo "✅ @yourclaw/clawguard-scanner installed"
+
+          # Install semgrep (SAST scanner)
+          pip install semgrep > /dev/null 2>&1 || echo "⚠ semgrep install failed — will skip SAST scan"
+          semgrep --version 2>/dev/null && echo "✅ semgrep installed" || true
+
+          # Install gitleaks (secret detection)
+          GITLEAKS_VERSION="8.24.0"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz -C /usr/local/bin gitleaks 2>/dev/null || echo "⚠ gitleaks install failed — will skip secret scan"
+          gitleaks version 2>/dev/null && echo "✅ gitleaks installed" || true
 
       - name: Scan commits between tags
         id: scan
@@ -232,12 +243,12 @@ jobs:
             [ -f "$f" ] || continue
             echo "  Scanning: $f"
 
-            # Run ClawGuard scanner via Node.js (builtinOnly to avoid needing semgrep/gitleaks in CI)
+            # Run full ClawGuard scanner (semgrep + gitleaks + prompt injection + npm audit)
             RESULT=$(NODE_PATH=/tmp/clawguard-runner/node_modules node -e "
               const { scanSkill } = require('@yourclaw/clawguard-scanner');
               (async () => {
                 try {
-                  const report = await scanSkill(process.argv[1], { builtinOnly: true, skipAI: true });
+                  const report = await scanSkill(process.argv[1], { builtinOnly: false, skipAI: true, scannerTimeout: 30000 });
                   const counts = report.score;
                   console.log(JSON.stringify({
                     status: report.status,
@@ -246,10 +257,17 @@ jobs:
                     medium: counts.medium,
                     low: counts.low,
                     info: counts.info,
+                    scanners: report.scanners.map(s => ({
+                      name: s.scanner,
+                      status: s.status,
+                      findingCount: s.findings.length,
+                      message: s.message || null
+                    })),
                     findings: report.findings.map(f => ({
                       severity: f.severity,
                       name: f.name,
                       message: f.message,
+                      scanner: f.scanner,
                       filePath: f.filePath || process.argv[1]
                     }))
                   }));
@@ -273,11 +291,14 @@ jobs:
             CG_HIGH=$((CG_HIGH + HIGH))
             CG_MEDIUM=$((CG_MEDIUM + MED))
 
+            # Show which scanners ran
+            echo "${RESULT}" | jq -r '.scanners[]? | "    [\(.status)] \(.name): \(.findingCount) findings\(if .message then " — " + .message else "" end)"' 2>/dev/null || true
+
             # Show findings inline
             FINDINGS_COUNT=$(echo "${RESULT}" | jq '.findings | length' 2>/dev/null || echo "0")
             if [ "${FINDINGS_COUNT}" -gt 0 ]; then
               echo "    Found ${FINDINGS_COUNT} issues (critical:${CRIT} high:${HIGH} medium:${MED})"
-              echo "${RESULT}" | jq -r '.findings[] | "      [\(.severity)] \(.name): \(.message)"' 2>/dev/null || true
+              echo "${RESULT}" | jq -r '.findings[] | "      [\(.severity)] (\(.scanner)) \(.name): \(.message)"' 2>/dev/null || true
               FINDING_LINES=$(echo "${RESULT}" | jq -r '.findings[] | "- **[\(.severity)]** \(.name): \(.message) (\(.filePath))"' 2>/dev/null || true)
               CG_REPORT="${CG_REPORT}\n${FINDING_LINES}"
             else
@@ -470,10 +491,12 @@ jobs:
               --title "${TITLE}" \
               --body "${BODY}" || exit 1
 
-            # Add label separately so it doesn't block PR creation
+            # Add label via API (gh pr edit --add-label can fail silently with token issues)
             PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
             if [ -n "${PR_NUMBER}" ]; then
-              gh pr edit --repo "${REPO}" "${PR_NUMBER}" --add-label "${LABEL}" 2>/dev/null || echo "Note: label '${LABEL}' not found — skipping"
+              gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+                --method POST --field "labels[]=${LABEL}" > /dev/null 2>&1 \
+                || echo "⚠ Could not add label '${LABEL}' (token may lack write permissions)"
             fi
           fi
 
