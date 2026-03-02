@@ -225,6 +225,17 @@ jobs:
 
           # ─── Part 2: ClawGuard scanner (deep analysis on changed .ts/.js files) ───
 
+          # Load scan suppressions (false positives we've already reviewed)
+          IGNORE_FILE="yourclaw-patches/scan-ignore.json"
+          if [ -f "${IGNORE_FILE}" ]; then
+            SUPPRESSIONS=$(cat "${IGNORE_FILE}" | jq -c '.suppressions // []')
+            SUPPRESSION_COUNT=$(echo "${SUPPRESSIONS}" | jq 'length')
+            echo "Loaded ${SUPPRESSION_COUNT} scan suppressions from ${IGNORE_FILE}"
+          else
+            SUPPRESSIONS="[]"
+            echo "No scan-ignore.json found"
+          fi
+
           echo "=== Running ClawGuard scanner on changed files ==="
           CHANGED_FILES_FILE=$(mktemp)
           git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' > "${CHANGED_FILES_FILE}" 2>/dev/null || true
@@ -244,38 +255,54 @@ jobs:
             echo "  Scanning: $f"
 
             # Run full ClawGuard scanner (semgrep + gitleaks + prompt injection + npm audit)
+            # Filters out suppressed findings from scan-ignore.json
             RESULT=$(NODE_PATH=/tmp/clawguard-runner/node_modules node -e "
               const { scanSkill } = require('@yourclaw/clawguard-scanner');
               (async () => {
                 try {
-                  const report = await scanSkill(process.argv[1], { builtinOnly: false, skipAI: true, scannerTimeout: 30000 });
-                  const counts = report.score;
+                  const filePath = process.argv[1];
+                  const suppressions = JSON.parse(process.argv[2] || '[]');
+                  const report = await scanSkill(filePath, { builtinOnly: false, skipAI: true, scannerTimeout: 30000 });
+
+                  // Filter out suppressed findings
+                  const relPath = filePath.replace(process.cwd() + '/', '');
+                  let suppressed = 0;
+                  const findings = report.findings.filter(f => {
+                    const isSuppressed = suppressions.some(s =>
+                      (s.rule === f.name || s.rule === f.id) &&
+                      relPath.includes(s.file)
+                    );
+                    if (isSuppressed) { suppressed++; return false; }
+                    return true;
+                  });
+
+                  // Recalculate severity counts from filtered findings
+                  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+                  findings.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+
                   console.log(JSON.stringify({
-                    status: report.status,
-                    critical: counts.critical,
-                    high: counts.high,
-                    medium: counts.medium,
-                    low: counts.low,
-                    info: counts.info,
+                    status: findings.some(f => f.severity === 'critical' || f.severity === 'high') ? 'failed' : (findings.length > 0 ? 'warning' : 'passed'),
+                    ...counts,
+                    suppressed,
                     scanners: report.scanners.map(s => ({
                       name: s.scanner,
                       status: s.status,
                       findingCount: s.findings.length,
                       message: s.message || null
                     })),
-                    findings: report.findings.map(f => ({
+                    findings: findings.map(f => ({
                       severity: f.severity,
                       name: f.name,
                       message: f.message,
                       scanner: f.scanner,
-                      filePath: f.filePath || process.argv[1]
+                      filePath: f.filePath || filePath
                     }))
                   }));
                 } catch (e) {
                   console.log(JSON.stringify({ status: 'error', error: e.message }));
                 }
               })();
-            " "$(pwd)/${f}" 2>/dev/null || echo '{"status":"error","error":"scanner crashed"}')
+            " "$(pwd)/${f}" "${SUPPRESSIONS}" 2>/dev/null || echo '{"status":"error","error":"scanner crashed"}')
 
             STATUS=$(echo "${RESULT}" | jq -r '.status // "error"' 2>/dev/null || echo "error")
             if [ "${STATUS}" = "error" ]; then
@@ -291,8 +318,13 @@ jobs:
             CG_HIGH=$((CG_HIGH + HIGH))
             CG_MEDIUM=$((CG_MEDIUM + MED))
 
+            SUPPRESSED=$(echo "${RESULT}" | jq -r '.suppressed // 0' 2>/dev/null || echo "0")
+
             # Show which scanners ran
             echo "${RESULT}" | jq -r '.scanners[]? | "    [\(.status)] \(.name): \(.findingCount) findings\(if .message then " — " + .message else "" end)"' 2>/dev/null || true
+            if [ "$SUPPRESSED" -gt 0 ]; then
+              echo "    (${SUPPRESSED} finding(s) suppressed via scan-ignore.json)"
+            fi
 
             # Show findings inline
             FINDINGS_COUNT=$(echo "${RESULT}" | jq '.findings | length' 2>/dev/null || echo "0")
@@ -404,6 +436,33 @@ jobs:
               git commit --no-edit -m "sync: merge upstream ${NEW_TAG} (auto-resolved yourclaw patches)"
               echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
             fi
+          fi
+
+          # Apply security patches from yourclaw-patches/security/
+          # These fix real vulnerabilities found in upstream code.
+          PATCH_DIR="yourclaw-patches/security"
+          if [ -d "${PATCH_DIR}" ] && ls "${PATCH_DIR}"/*.patch 1>/dev/null 2>&1; then
+            echo "Applying security patches..."
+            PATCHES_APPLIED=0
+            PATCHES_FAILED=0
+            for patch in "${PATCH_DIR}"/*.patch; do
+              PATCH_NAME="$(basename "$patch")"
+              if git apply --check "$patch" 2>/dev/null; then
+                git apply "$patch"
+                echo "  ✅ Applied: ${PATCH_NAME}"
+                PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+              else
+                echo "  ⚠️ Skipped: ${PATCH_NAME} (does not apply cleanly — upstream may have fixed this)"
+                PATCHES_FAILED=$((PATCHES_FAILED + 1))
+              fi
+            done
+            if [ "${PATCHES_APPLIED}" -gt 0 ]; then
+              git add -A
+              git commit -m "security: apply ${PATCHES_APPLIED} YourClaw security patches" || true
+            fi
+            echo "Security patches: ${PATCHES_APPLIED} applied, ${PATCHES_FAILED} skipped"
+          else
+            echo "No security patches to apply"
           fi
 
           # Remove upstream workflow files after merge.

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://yourclaw.dev/schemas/scan-ignore.json",
+  "description": "ClawGuard scan suppressions for known false positives in upstream code. Each entry must include a justification explaining why the finding is safe.",
+  "suppressions": [
+    {
+      "id": "spawn-shell-true-acpx",
+      "rule": "javascript.lang.security.audit.spawn-shell-true.spawn-shell-true",
+      "file": "extensions/acpx/src/runtime-internals/process.ts",
+      "scanner": "semgrep",
+      "justification": "shell:true only for Windows .cmd/.bat files. Args passed as array (no injection vector). Command comes from config, not user input. Required for Windows batch execution.",
+      "addedBy": "yourclaw-bot",
+      "addedAt": "2026-03-02",
+      "reference": "https://github.com/yourclaw/openclaw/pull/4"
+    },
+    {
+      "id": "unicode-escape-bluebubbles",
+      "rule": "encodingObfuscation",
+      "file": "extensions/bluebubbles/src/monitor-processing.ts",
+      "scanner": "clawguard-rules",
+      "justification": "\\u0000 null byte used as composite key delimiter for message deduplication caches. Standard pattern to prevent key collisions (e.g. separating accountId from historyId). No obfuscation intent.",
+      "addedBy": "yourclaw-bot",
+      "addedAt": "2026-03-02",
+      "reference": "https://github.com/yourclaw/openclaw/pull/4"
+    }
+  ]
+}
