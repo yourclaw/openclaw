@@ -110,9 +110,10 @@ jobs:
 
       - name: Install ClawGuard scanner
         run: |
-          # Install from the monorepo's clawguard-scanner
-          # In production, this would be: npm install -g @yourclaw/clawguard-scanner
-          npm install -g clawguard-scanner 2>/dev/null || echo "ClawGuard scanner not yet published — using diff-based scan"
+          mkdir -p /tmp/clawguard-runner && cd /tmp/clawguard-runner
+          npm init -y > /dev/null 2>&1
+          npm install @yourclaw/clawguard-scanner@latest
+          echo "✅ Installed @yourclaw/clawguard-scanner $(npm ls @yourclaw/clawguard-scanner --depth=0 2>/dev/null | grep clawguard)"
 
       - name: Scan commits between tags
         id: scan
@@ -135,14 +136,19 @@ jobs:
           fi
 
           echo "Scanning commits in range: ${DIFF_RANGE}"
+          echo ""
 
-          # Check for suspicious patterns in the diff
+          # ─── Part 1: Diff-based pattern matching (fast, always runs) ───
+
           DIFF_CONTENT=$(git diff "${DIFF_RANGE}" -- '*.ts' '*.js' '*.json' '*.yml' '*.yaml' 2>/dev/null || echo "")
 
           # Pattern 1: Hardcoded credentials or API keys
-          if echo "${DIFF_CONTENT}" | grep -iE '(api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*["\x27][A-Za-z0-9+/=]{20,}' > /dev/null 2>&1; then
+          CRED_MATCHES=$(echo "${DIFF_CONTENT}" | grep -iE '(api[_-]?key|secret[_-]?key|password|token)\s*[:=]\s*["\x27][A-Za-z0-9+/=]{20,}' 2>/dev/null | head -5 || true)
+          if [ -n "${CRED_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ CREDENTIAL LEAK: Possible hardcoded credentials detected"
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${CRED_MATCHES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            echo "::warning::Possible hardcoded credentials detected in diff"
           fi
 
           # Pattern 2: eval() or Function() constructor usage
@@ -150,53 +156,132 @@ jobs:
           FUNC_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\bnew\s*Function\s*(' 2>/dev/null | tail -1 || echo "0")
           EVAL_COUNT="${EVAL_COUNT:-0}"; FUNC_COUNT="${FUNC_COUNT:-0}"
           if [ "$EVAL_COUNT" -gt 0 ] 2>/dev/null || [ "$FUNC_COUNT" -gt 0 ] 2>/dev/null; then
+            EVAL_SAMPLES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(eval\s*\(|new\s*Function\s*\()' | head -5 || true)
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ CODE INJECTION: ${EVAL_COUNT} eval() and ${FUNC_COUNT} new Function() calls added"
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${EVAL_SAMPLES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            echo "::warning::${EVAL_COUNT} eval() and ${FUNC_COUNT} new Function() calls found"
           fi
 
           # Pattern 3: Suspicious network calls (data exfiltration)
-          if echo "${DIFF_CONTENT}" | grep -E '^\+.*fetch\s*\(\s*["\x27]https?://' | grep -iv 'localhost\|127\.0\.0\.1\|github\.com\|npmjs\|googleapis' > /dev/null 2>&1; then
+          NETWORK_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*fetch\s*\(\s*["\x27]https?://' | grep -iv 'localhost\|127\.0\.0\.1\|github\.com\|npmjs\|googleapis' | head -5 || true)
+          if [ -n "${NETWORK_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ NETWORK: New external HTTP calls detected — review for data exfiltration"
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${NETWORK_MATCHES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            echo "::warning::External HTTP calls detected in diff"
           fi
 
           # Pattern 4: Dependency changes (supply chain risk)
           if git diff "${DIFF_RANGE}" -- 'package.json' 'pnpm-lock.yaml' | grep -q '^\+'; then
             DEPS_ADDED=$(git diff "${DIFF_RANGE}" -- 'package.json' | grep '^\+.*"[^"]*":' | grep -v '^\+\+\+' | wc -l || echo "0")
+            DEPS_SAMPLES=$(git diff "${DIFF_RANGE}" -- 'package.json' | grep '^\+.*"[^"]*":' | grep -v '^\+\+\+' | head -10 || true)
             SCAN_REPORT="${SCAN_REPORT}\nℹ️ SUPPLY CHAIN: ${DEPS_ADDED} dependency changes detected — manual review recommended"
-            # Don't fail on dependency changes, just flag for review
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${DEPS_SAMPLES}\n\`\`\`"
           fi
 
           # Pattern 5: Shell command injection vectors
-          if echo "${DIFF_CONTENT}" | grep -E '^\+.*child_process|^\+.*execSync|^\+.*spawn\(' > /dev/null 2>&1; then
-            EXEC_COUNT=$(echo "${DIFF_CONTENT}" | grep -cE '^\+.*(child_process|execSync|spawn\()' 2>/dev/null || echo "0")
+          EXEC_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(child_process|execSync|spawn\()' | head -5 || true)
+          if [ -n "${EXEC_MATCHES}" ]; then
+            EXEC_COUNT=$(echo "${EXEC_MATCHES}" | wc -l | tr -d ' ')
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ COMMAND EXEC: ${EXEC_COUNT} new shell execution calls added"
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${EXEC_MATCHES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            echo "::warning::${EXEC_COUNT} shell execution calls found"
           fi
 
           # Pattern 6: Filesystem access outside workspace
-          if echo "${DIFF_CONTENT}" | grep -E '^\+.*(\/etc\/|\/root\/|\/home\/|process\.env\.HOME)' > /dev/null 2>&1; then
+          FS_MATCHES=$(echo "${DIFF_CONTENT}" | grep -E '^\+.*(\/etc\/|\/root\/|\/home\/|process\.env\.HOME)' | head -5 || true)
+          if [ -n "${FS_MATCHES}" ]; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ FS ACCESS: Possible filesystem access outside workspace boundaries"
+            SCAN_REPORT="${SCAN_REPORT}\n\`\`\`\n${FS_MATCHES}\n\`\`\`"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            echo "::warning::Filesystem access outside workspace detected"
           fi
 
-          # Try ClawGuard scanner CLI if available
-          if command -v clawguard-scan &> /dev/null; then
-            echo "Running ClawGuard scanner..."
-            # Export changed files for scanning
-            CHANGED_FILES=$(git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' | head -100)
-            for f in ${CHANGED_FILES}; do
-              if [ -f "$f" ]; then
-                clawguard-scan "$f" >> /tmp/clawguard-results.txt 2>&1 || true
-              fi
-            done
-            if [ -f /tmp/clawguard-results.txt ]; then
-              CG_ISSUES=$(grep -c 'CRITICAL\|HIGH' /tmp/clawguard-results.txt 2>/dev/null || echo "0")
-              if [ "$CG_ISSUES" -gt 0 ]; then
-                SCAN_REPORT="${SCAN_REPORT}\n🔴 CLAWGUARD: ${CG_ISSUES} critical/high issues found by ClawGuard scanner"
-                ISSUES_FOUND=$((ISSUES_FOUND + CG_ISSUES))
-              fi
+          echo ""
+          echo "=== Diff-based scan complete: ${ISSUES_FOUND} issues ==="
+          echo ""
+
+          # ─── Part 2: ClawGuard scanner (deep analysis on changed .ts/.js files) ───
+
+          echo "=== Running ClawGuard scanner on changed files ==="
+          CHANGED_FILES=$(git diff --name-only "${DIFF_RANGE}" -- '*.ts' '*.js' 2>/dev/null | head -50)
+          CG_CRITICAL=0
+          CG_HIGH=0
+          CG_MEDIUM=0
+          CG_REPORT=""
+
+          for f in ${CHANGED_FILES}; do
+            [ -f "$f" ] || continue
+            echo "  Scanning: $f"
+
+            # Run ClawGuard scanner via Node.js (builtinOnly to avoid needing semgrep/gitleaks in CI)
+            RESULT=$(node -e "
+              const { scanSkill, formatMarkdown } = require('@yourclaw/clawguard-scanner');
+              (async () => {
+                try {
+                  const report = await scanSkill('$(pwd)/${f}', { builtinOnly: true, skipAI: true });
+                  const counts = report.score;
+                  console.log(JSON.stringify({
+                    status: report.status,
+                    critical: counts.critical,
+                    high: counts.high,
+                    medium: counts.medium,
+                    low: counts.low,
+                    info: counts.info,
+                    findings: report.findings.map(f => ({
+                      severity: f.severity,
+                      name: f.name,
+                      message: f.message,
+                      filePath: f.filePath || '${f}'
+                    }))
+                  }));
+                } catch (e) {
+                  console.log(JSON.stringify({ status: 'error', error: e.message }));
+                }
+              })();
+            " --require /tmp/clawguard-runner/node_modules/@yourclaw/clawguard-scanner 2>/dev/null || echo '{"status":"error","error":"scanner crashed"}')
+
+            STATUS=$(echo "${RESULT}" | jq -r '.status // "error"' 2>/dev/null || echo "error")
+            if [ "${STATUS}" = "error" ]; then
+              ERROR_MSG=$(echo "${RESULT}" | jq -r '.error // "unknown"' 2>/dev/null || echo "unknown")
+              echo "    ⚠ Scanner error: ${ERROR_MSG}"
+              continue
             fi
+
+            CRIT=$(echo "${RESULT}" | jq -r '.critical // 0')
+            HIGH=$(echo "${RESULT}" | jq -r '.high // 0')
+            MED=$(echo "${RESULT}" | jq -r '.medium // 0')
+            CG_CRITICAL=$((CG_CRITICAL + CRIT))
+            CG_HIGH=$((CG_HIGH + HIGH))
+            CG_MEDIUM=$((CG_MEDIUM + MED))
+
+            # Show findings inline
+            FINDINGS_COUNT=$(echo "${RESULT}" | jq '.findings | length' 2>/dev/null || echo "0")
+            if [ "${FINDINGS_COUNT}" -gt 0 ]; then
+              echo "    Found ${FINDINGS_COUNT} issues (critical:${CRIT} high:${HIGH} medium:${MED})"
+              echo "${RESULT}" | jq -r '.findings[] | "      [\(.severity)] \(.name): \(.message)"' 2>/dev/null || true
+              FINDING_LINES=$(echo "${RESULT}" | jq -r '.findings[] | "- **[\(.severity)]** \(.name): \(.message) (\(.filePath))"' 2>/dev/null || true)
+              CG_REPORT="${CG_REPORT}\n${FINDING_LINES}"
+            else
+              echo "    ✅ Clean"
+            fi
+          done
+
+          echo ""
+          echo "=== ClawGuard scan complete: critical=${CG_CRITICAL} high=${CG_HIGH} medium=${CG_MEDIUM} ==="
+
+          if [ "${CG_CRITICAL}" -gt 0 ] || [ "${CG_HIGH}" -gt 0 ]; then
+            SCAN_REPORT="${SCAN_REPORT}\n\n🔴 **ClawGuard Scanner:** ${CG_CRITICAL} critical, ${CG_HIGH} high, ${CG_MEDIUM} medium findings"
+            SCAN_REPORT="${SCAN_REPORT}\n${CG_REPORT}"
+            ISSUES_FOUND=$((ISSUES_FOUND + CG_CRITICAL + CG_HIGH))
+            echo "::error::ClawGuard found ${CG_CRITICAL} critical and ${CG_HIGH} high severity issues"
+          elif [ "${CG_MEDIUM}" -gt 0 ]; then
+            SCAN_REPORT="${SCAN_REPORT}\n\n🟡 **ClawGuard Scanner:** ${CG_MEDIUM} medium findings (review recommended)"
+            SCAN_REPORT="${SCAN_REPORT}\n${CG_REPORT}"
+          else
+            SCAN_REPORT="${SCAN_REPORT}\n\n✅ **ClawGuard Scanner:** No significant findings"
           fi
 
           # Summary
