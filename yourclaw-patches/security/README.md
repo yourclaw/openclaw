@@ -35,3 +35,14 @@ git diff > yourclaw-patches/security/001-description.patch
 
 When upstream fixes the issue, the patch will fail to apply cleanly.
 The workflow logs a warning, and you should remove the obsolete patch file.
+
+## False positives vs. real vulnerabilities
+
+- **Real vulnerability** → add a `.patch` file here to fix the code
+- **False positive** → add a suppression entry to `../scan-ignore.json`
+
+Every entry in `scan-ignore.json` includes a `reference` URL pointing to the
+PR that discovered the finding (e.g. the upstream sync PR). This creates a
+transparent audit trail so reviewers can see the original scan results and
+analysis. See [PR #4](https://github.com/yourclaw/openclaw/pull/4) for the
+initial set of suppressions and the reasoning behind each one.
