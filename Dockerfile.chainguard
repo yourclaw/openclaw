@@ -14,13 +14,13 @@ FROM cgr.dev/chainguard/node:latest-dev AS builder
 USER root
 
 # Install build dependencies
+# Note: Wolfi/Chainguard uses 'build-base' instead of individual gcc/g++/make
+# packages. 'build-base' bundles gcc, g++, make, binutils, and glibc-dev.
 RUN apk update && apk add --no-cache \
     bash \
     git \
     python3 \
-    make \
-    gcc \
-    g++ \
+    build-base \
     curl
 
 # Install Bun (required for build scripts)
