@@ -453,23 +453,27 @@ jobs:
           PREOF
           )
 
+          # IMPORTANT: --repo is required because this is a fork.
+          # Without it, gh defaults to creating PRs against the upstream parent repo.
+          REPO="${GITHUB_REPOSITORY}"
+
           # Check if PR already exists
-          EXISTING_PR=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          EXISTING_PR=$(gh pr list --repo "${REPO}" --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ -n "${EXISTING_PR}" ]; then
             echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH} — updating"
-            gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body "${BODY}"
+            gh pr edit --repo "${REPO}" "${EXISTING_PR}" --title "${TITLE}" --body "${BODY}"
           else
-            # Create PR (label is best-effort — don't fail if it doesn't exist)
             gh pr create \
+              --repo "${REPO}" \
               --base "${FORK_BRANCH}" \
               --head "${SYNC_BRANCH}" \
               --title "${TITLE}" \
               --body "${BODY}" || exit 1
 
             # Add label separately so it doesn't block PR creation
-            PR_NUMBER=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
+            PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${SYNC_BRANCH}" --json number --jq '.[0].number' 2>/dev/null || echo "")
             if [ -n "${PR_NUMBER}" ]; then
-              gh pr edit "${PR_NUMBER}" --add-label "${LABEL}" 2>/dev/null || echo "Note: label '${LABEL}' not found — skipping"
+              gh pr edit --repo "${REPO}" "${PR_NUMBER}" --add-label "${LABEL}" 2>/dev/null || echo "Note: label '${LABEL}' not found — skipping"
             fi
           fi
 
@@ -479,8 +483,9 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_PAT }}
           SYNC_BRANCH: ${{ steps.merge.outputs.sync_branch }}
         run: |
-          PR_NUMBER=$(gh pr list --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
+          REPO="${GITHUB_REPOSITORY}"
+          PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
           if [ -n "${PR_NUMBER}" ]; then
-            gh pr merge "${PR_NUMBER}" --squash --auto --delete-branch
+            gh pr merge --repo "${REPO}" "${PR_NUMBER}" --squash --auto --delete-branch
             echo "Auto-merge enabled for PR #${PR_NUMBER}"
           fi
