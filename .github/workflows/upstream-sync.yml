@@ -109,22 +109,29 @@ jobs:
           node-version: "22"
 
       - name: Install ClawGuard scanner and security tools
+        id: install-tools
         run: |
           # Install ClawGuard scanner from npm
           mkdir -p /tmp/clawguard-runner && cd /tmp/clawguard-runner
           npm init -y > /dev/null 2>&1
           npm install @yourclaw/clawguard-scanner@latest
-          echo "✅ @yourclaw/clawguard-scanner installed"
+          SCANNER_VERSION=$(node -e "console.log(require('@yourclaw/clawguard-scanner/package.json').version)" 2>/dev/null || echo "unknown")
+          echo "✅ @yourclaw/clawguard-scanner@${SCANNER_VERSION} installed"
+          echo "scanner_version=${SCANNER_VERSION}" >> "$GITHUB_OUTPUT"
 
           # Install semgrep (SAST scanner)
           pip install semgrep > /dev/null 2>&1 || echo "⚠ semgrep install failed — will skip SAST scan"
-          semgrep --version 2>/dev/null && echo "✅ semgrep installed" || true
+          SEMGREP_VERSION=$(semgrep --version 2>/dev/null || echo "not installed")
+          echo "semgrep_version=${SEMGREP_VERSION}" >> "$GITHUB_OUTPUT"
+          [ "${SEMGREP_VERSION}" != "not installed" ] && echo "✅ semgrep@${SEMGREP_VERSION} installed" || true
 
           # Install gitleaks (secret detection)
           GITLEAKS_VERSION="8.24.0"
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar xz -C /usr/local/bin gitleaks 2>/dev/null || echo "⚠ gitleaks install failed — will skip secret scan"
-          gitleaks version 2>/dev/null && echo "✅ gitleaks installed" || true
+          GITLEAKS_ACTUAL=$(gitleaks version 2>/dev/null || echo "not installed")
+          echo "gitleaks_version=${GITLEAKS_ACTUAL}" >> "$GITHUB_OUTPUT"
+          [ "${GITLEAKS_ACTUAL}" != "not installed" ] && echo "✅ gitleaks@${GITLEAKS_ACTUAL} installed" || true
 
       - name: Scan commits between tags
         id: scan
@@ -375,6 +382,16 @@ jobs:
             echo "**Result:** ${SUMMARY}"
             echo ""
             echo -e "${SCAN_REPORT}"
+            echo ""
+            echo "<details><summary>🔧 Scanner versions</summary>"
+            echo ""
+            echo "| Tool | Version |"
+            echo "| ---- | ------- |"
+            echo "| @yourclaw/clawguard-scanner | ${{ steps.install-tools.outputs.scanner_version }} |"
+            echo "| semgrep | ${{ steps.install-tools.outputs.semgrep_version }} |"
+            echo "| gitleaks | ${{ steps.install-tools.outputs.gitleaks_version }} |"
+            echo ""
+            echo "</details>"
             echo "CLAWGUARD_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -568,6 +585,10 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${SYNC_BRANCH}" --json number --jq '.[0].number')
           if [ -n "${PR_NUMBER}" ]; then
-            gh pr merge --repo "${REPO}" "${PR_NUMBER}" --squash --auto --delete-branch
-            echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            if gh pr merge --repo "${REPO}" "${PR_NUMBER}" --squash --auto --delete-branch 2>&1; then
+              echo "Auto-merge enabled for PR #${PR_NUMBER}"
+            else
+              echo "⚠ Auto-merge not available (enable in repo Settings → General → Allow auto-merge)"
+              echo "PR #${PR_NUMBER} is ready for manual merge"
+            fi
           fi
