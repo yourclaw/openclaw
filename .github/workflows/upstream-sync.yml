@@ -146,9 +146,10 @@ jobs:
           fi
 
           # Pattern 2: eval() or Function() constructor usage
-          EVAL_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\beval\s*(' 2>/dev/null || echo "0")
-          FUNC_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\bnew\s*Function\s*(' 2>/dev/null || echo "0")
-          if [ "$EVAL_COUNT" -gt 0 ] || [ "$FUNC_COUNT" -gt 0 ]; then
+          EVAL_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\beval\s*(' 2>/dev/null | tail -1 || echo "0")
+          FUNC_COUNT=$(echo "${DIFF_CONTENT}" | grep -c '^\+.*\bnew\s*Function\s*(' 2>/dev/null | tail -1 || echo "0")
+          EVAL_COUNT="${EVAL_COUNT:-0}"; FUNC_COUNT="${FUNC_COUNT:-0}"
+          if [ "$EVAL_COUNT" -gt 0 ] 2>/dev/null || [ "$FUNC_COUNT" -gt 0 ] 2>/dev/null; then
             SCAN_REPORT="${SCAN_REPORT}\n⚠️ CODE INJECTION: ${EVAL_COUNT} eval() and ${FUNC_COUNT} new Function() calls added"
             ISSUES_FOUND=$((ISSUES_FOUND + 1))
           fi
@@ -262,32 +263,14 @@ jobs:
           # Create sync branch from yourclaw
           git checkout -b "${SYNC_BRANCH}"
 
-          # Set up merge driver to always keep our version of YourClaw-specific paths.
-          # This is the "patch" approach: we declare which paths are ours via .gitattributes
-          # merge strategy, so upstream changes to these paths are ignored cleanly.
-          #
-          # Why we keep our .github/workflows/ and ignore upstream's:
-          #   - GITHUB_TOKEN cannot push changes to workflow files (GitHub security restriction)
-          #   - Upstream's workflows are configured for openclaw/openclaw (their Docker registry,
-          #     npm package, CI runners) — they would fail on our fork anyway
-          #   - Our workflows (upstream-sync.yml, release.yml) are purpose-built for our fork
-          git config merge.ours.driver true
-          cat >> .gitattributes <<'ATTR_EOF'
-          .github/workflows/** merge=ours
-          yourclaw-patches/** merge=ours
-          Dockerfile.chainguard merge=ours
-          extensions/clawguard-registry/** merge=ours
-          ATTR_EOF
-
-          # Attempt merge — .gitattributes merge=ours keeps our protected paths intact
+          # Attempt merge
           if git merge "${NEW_TAG}" --no-edit -m "sync: merge upstream ${NEW_TAG} into yourclaw"; then
             echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
           else
-            # Fallback: auto-resolve any remaining conflicts in our protected paths
-            git checkout --ours .github/workflows/ yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
-            git add .github/workflows/ yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
+            # Auto-resolve conflicts in YourClaw-owned paths (keep ours)
+            git checkout --ours yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
+            git add yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
 
-            # Check if there are still unresolved conflicts in non-protected files
             if git diff --name-only --diff-filter=U | head -1 | grep -q .; then
               echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
               echo "⚠️ Unresolved merge conflicts — manual intervention required"
@@ -300,8 +283,25 @@ jobs:
             fi
           fi
 
-          # Restore .gitattributes to committed version (remove temporary merge directives)
-          git checkout HEAD -- .gitattributes 2>/dev/null || true
+          # Remove upstream workflow files after merge.
+          #
+          # Why this is necessary (not just a preference):
+          #   GitHub's GITHUB_TOKEN CANNOT push commits that modify .github/workflows/ files.
+          #   This is a hard security restriction — not a configuration issue. The only
+          #   alternative is a PAT with the `workflows` scope (set as SYNC_PAT secret).
+          #
+          # Why upstream's workflows don't help us anyway:
+          #   They're configured for openclaw/openclaw (their Docker registry, npm package,
+          #   Blacksmith CI runners). They'd fail on our fork. Our upstream-sync.yml and
+          #   release.yml are purpose-built for the YourClaw fork pipeline.
+          OURS_WORKFLOWS="upstream-sync.yml release.yml"
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            BASENAME="$(basename "$f")"
+            echo "${OURS_WORKFLOWS}" | grep -qw "${BASENAME}" && continue
+            git rm -f "$f"
+          done
+          git commit -m "chore: remove upstream workflows (incompatible with fork)" --allow-empty || true
 
           # Update LAST_SYNCED_TAG
           echo "${NEW_TAG}" > yourclaw-patches/LAST_SYNCED_TAG
