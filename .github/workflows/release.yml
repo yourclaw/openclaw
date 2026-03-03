@@ -15,12 +15,13 @@ on:
       - "docs/**"
       - "**/*.md"
       - "**/*.mdx"
+      - ".github/**"
   workflow_dispatch:
     inputs:
       version_suffix:
-        description: "Version suffix (e.g., 1 for -yourclaw.1)"
+        description: "Override version suffix (leave empty for auto-increment)"
         required: false
-        default: "1"
+        default: ""
         type: string
 
 concurrency:
@@ -79,13 +80,22 @@ jobs:
           UPSTREAM_TAG=$(cat yourclaw-patches/LAST_SYNCED_TAG 2>/dev/null | tr -d '[:space:]' || echo "v0.0.0")
           UPSTREAM_VERSION="${UPSTREAM_TAG#v}"
 
-          # Determine yourclaw suffix
-          SUFFIX="${{ inputs.version_suffix || '1' }}"
-
           # If triggered by tag push, extract version from tag
           if [[ "${GITHUB_REF}" == refs/tags/yourclaw-* ]]; then
             VERSION="${GITHUB_REF#refs/tags/yourclaw-}"
           else
+            # Auto-increment suffix based on commits since last upstream sync.
+            # The sync commit (which updated LAST_SYNCED_TAG) is the baseline.
+            # Suffix 1 = the sync itself, 2 = first patch after sync, etc.
+            SYNC_COMMIT=$(git log -1 --format=%H -- yourclaw-patches/LAST_SYNCED_TAG)
+            PATCH_COUNT=$(git rev-list --count "${SYNC_COMMIT}..HEAD")
+            SUFFIX=$(( PATCH_COUNT + 1 ))
+
+            # Allow manual override via workflow_dispatch
+            if [ -n "${{ inputs.version_suffix }}" ]; then
+              SUFFIX="${{ inputs.version_suffix }}"
+            fi
+
             VERSION="${UPSTREAM_VERSION}-yourclaw.${SUFFIX}"
           fi
 
