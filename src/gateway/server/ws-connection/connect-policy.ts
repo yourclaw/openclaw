@@ -40,6 +40,14 @@ export function shouldSkipControlUiPairing(
   if (trustedProxyAuthOk) {
     return true;
   }
+  // When device auth is fully disabled (dangerouslyDisableDeviceAuth: true),
+  // skip pairing entirely — even without shared auth.  This is intentional
+  // for managed deployments where the gateway sits behind an auth proxy
+  // (e.g. Cloudflare tunnel + access token) and browser clients cannot
+  // provide the gateway token directly (iframe embedding).
+  if (policy.dangerouslyDisableDeviceAuth) {
+    return true;
+  }
   return policy.allowBypass && sharedAuthOk;
 }
 

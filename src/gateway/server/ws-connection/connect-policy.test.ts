@@ -183,7 +183,8 @@ describe("ws connect policy", () => {
       deviceRaw: null,
     });
     expect(shouldSkipControlUiPairing(bypass, true, false)).toBe(true);
-    expect(shouldSkipControlUiPairing(bypass, false, false)).toBe(false);
+    // dangerouslyDisableDeviceAuth skips pairing even without shared auth
+    expect(shouldSkipControlUiPairing(bypass, false, false)).toBe(true);
     expect(shouldSkipControlUiPairing(strict, true, false)).toBe(false);
     expect(shouldSkipControlUiPairing(strict, false, true)).toBe(true);
   });
