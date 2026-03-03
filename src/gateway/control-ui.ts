@@ -98,7 +98,12 @@ type ControlUiAvatarMeta = {
 };
 
 function applyControlUiSecurityHeaders(res: ServerResponse) {
-  res.setHeader("X-Frame-Options", "DENY");
+  // Only set X-Frame-Options: DENY when framing is fully blocked.
+  // When OPENCLAW_FRAME_ANCESTORS is configured, CSP frame-ancestors
+  // takes precedence and X-Frame-Options would conflict.
+  if (!process.env.OPENCLAW_FRAME_ANCESTORS?.trim()) {
+    res.setHeader("X-Frame-Options", "DENY");
+  }
   res.setHeader("Content-Security-Policy", buildControlUiCspHeader());
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
