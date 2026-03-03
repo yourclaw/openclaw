@@ -165,13 +165,30 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      skipped: ${{ steps.check.outputs.exists }}
     steps:
+      - name: Check if image already exists
+        id: check
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Idempotent: skip build if tag already exists in registry
+          if docker manifest inspect "${IMAGE}:${VERSION}-amd64" &>/dev/null; then
+            echo "::warning::${IMAGE}:${VERSION}-amd64 already exists — skipping build"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
+        if: steps.check.outputs.exists != 'true'
         uses: actions/checkout@v4
         with:
           ref: yourclaw
 
       - name: Set up Docker Buildx
+        if: steps.check.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
@@ -182,6 +199,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (amd64)
+        if: steps.check.outputs.exists != 'true'
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -204,16 +222,34 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      skipped: ${{ steps.check.outputs.exists }}
     steps:
+      - name: Check if image already exists
+        id: check
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Idempotent: skip build if tag already exists in registry
+          if docker manifest inspect "${IMAGE}:${VERSION}-arm64" &>/dev/null; then
+            echo "::warning::${IMAGE}:${VERSION}-arm64 already exists — skipping build"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
+        if: steps.check.outputs.exists != 'true'
         uses: actions/checkout@v4
         with:
           ref: yourclaw
 
       - name: Set up Docker Buildx
+        if: steps.check.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Set up QEMU
+        if: steps.check.outputs.exists != 'true'
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -226,6 +262,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (arm64)
+        if: steps.check.outputs.exists != 'true'
         id: build
         uses: docker/build-push-action@v5
         with:
