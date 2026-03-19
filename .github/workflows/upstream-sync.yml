@@ -439,18 +439,56 @@ jobs:
           if git merge "${NEW_TAG}" --no-edit -m "sync: merge upstream ${NEW_TAG} into yourclaw"; then
             echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
           else
-            # Auto-resolve conflicts in YourClaw-owned paths (keep ours)
+            echo "Merge has conflicts — attempting auto-resolution..."
+
+            # Layer 1: YourClaw-owned paths — keep ours (our patches take precedence)
             git checkout --ours yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
             git add yourclaw-patches/ Dockerfile.chainguard extensions/clawguard-registry/ 2>/dev/null || true
 
-            if git diff --name-only --diff-filter=U | head -1 | grep -q .; then
+            # Layer 2: .github/workflows/ — accept upstream version temporarily
+            # (the post-merge cleanup step deletes non-yourclaw workflows anyway)
+            # Note: modify/delete conflicts need explicit "git add" after checkout --theirs
+            # because git leaves them as "deleted by us" even after restoring the file.
+            CONFLICTED_WORKFLOWS=$(git diff --name-only --diff-filter=U -- '.github/workflows/' 2>/dev/null || true)
+            if [ -n "${CONFLICTED_WORKFLOWS}" ]; then
+              echo "Auto-resolving workflow conflicts (accept upstream, will delete later):"
+              while IFS= read -r wf; do
+                [ -z "$wf" ] && continue
+                echo "  → ${wf}"
+                git checkout --theirs "$wf" 2>/dev/null || true
+                git add "$wf" 2>/dev/null || true
+              done <<< "${CONFLICTED_WORKFLOWS}"
+            fi
+
+            # Layer 3: Content files we patch — accept upstream, re-apply patches later
+            CONFLICTED_PATCHED=$(git diff --name-only --diff-filter=U -- \
+              docker-compose.yml Dockerfile Dockerfile.chainguard \
+              SECURITY.md .env.example .claude/settings.json 2>/dev/null || true)
+            if [ -n "${CONFLICTED_PATCHED}" ]; then
+              echo "Auto-resolving patched file conflicts (accept upstream, re-apply patches later):"
+              while IFS= read -r pf; do
+                [ -z "$pf" ] && continue
+                echo "  → ${pf}"
+                git checkout --theirs "$pf" 2>/dev/null || true
+                git add "$pf" 2>/dev/null || true
+              done <<< "${CONFLICTED_PATCHED}"
+            fi
+
+            # Check for any remaining unresolved conflicts
+            REMAINING=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
+            if [ -n "${REMAINING}" ]; then
+              echo ""
+              echo "::error::Unresolved merge conflicts that require manual intervention:"
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                echo "  ✗ ${f}"
+              done <<< "${REMAINING}"
               echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
-              echo "⚠️ Unresolved merge conflicts — manual intervention required"
+              # Fail loudly — do NOT silently push an empty branch
               git merge --abort
-              git push origin "${SYNC_BRANCH}" --force
-              exit 0
+              exit 1
             else
-              git commit --no-edit -m "sync: merge upstream ${NEW_TAG} (auto-resolved yourclaw patches)"
+              git commit --no-edit -m "sync: merge upstream ${NEW_TAG} (auto-resolved conflicts)"
               echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
             fi
           fi
