@@ -1,0 +1,107 @@
+diff --git a/Dockerfile.chainguard b/Dockerfile.chainguard
+new file mode 100644
+index 000000000..f7a902627
+--- /dev/null
++++ b/Dockerfile.chainguard
+@@ -0,0 +1,101 @@
++# YourClaw hardened OpenClaw image based on Chainguard (zero-CVE base)
++# https://images.chainguard.dev/directory/image/node/overview
++#
++# Build:
++#   docker build -f Dockerfile.chainguard -t ghcr.io/yourclaw/openclaw:latest .
++#   docker build -f Dockerfile.chainguard --build-arg OPENCLAW_INSTALL_BROWSER=1 -t ghcr.io/yourclaw/openclaw:latest-browser .
++#
++# Run:
++#   docker run -v ~/.openclaw:/home/node/.openclaw ghcr.io/yourclaw/openclaw:latest
++
++# --- Stage 1: Build ---
++FROM cgr.dev/chainguard/node:latest-dev AS builder
++
++USER root
++
++# Install build dependencies
++# Note: Wolfi/Chainguard uses 'build-base' instead of individual gcc/g++/make
++# packages. 'build-base' bundles gcc, g++, make, binutils, and glibc-dev.
++RUN apk update && apk add --no-cache \
++    bash \
++    git \
++    python3 \
++    build-base \
++    curl
++
++# Install Bun (required for build scripts)
++RUN curl -fsSL https://bun.sh/install | bash
++ENV PATH="/root/.bun/bin:${PATH}"
++
++# Install pnpm via corepack
++RUN corepack enable
++
++# Ensure pnpm runs in non-interactive CI mode
++ENV CI=true
++
++WORKDIR /app
++
++# Copy dependency manifests first for layer caching
++COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
++COPY ui/package.json ./ui/package.json
++COPY patches ./patches
++COPY scripts ./scripts
++
++RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile
++
++# Copy source and build
++COPY . .
++RUN pnpm build
++ENV OPENCLAW_PREFER_PNPM=1
++RUN pnpm ui:build
++
++# Prune dev dependencies for smaller production image
++RUN pnpm prune --prod
++
++# Build gogcli for Google Apps integration
++ARG GOG_VERSION='v0.11.0'
++RUN apk add --no-cache go && \
++    git clone https://github.com/steipete/gogcli.git -b ${GOG_VERSION} /gogcli && \
++    cd /gogcli && make BIN_DIR=/usr/local/bin/ && \
++    rm -rf /gogcli
++
++# --- Stage 2: Production ---
++FROM cgr.dev/chainguard/node:latest
++
++# Security: Run as non-root (uid 65532 in Chainguard)
++# The minimal (non-dev) image uses 'node' as the default user.
++# We use numeric UID for portability across Chainguard image variants.
++USER 65532
++
++WORKDIR /app
++
++# Copy built application from builder
++# Note: dist/ already contains control-ui/ (UI build output from vite)
++COPY --from=builder --chown=65532:65532 /app/dist ./dist
++COPY --from=builder --chown=65532:65532 /app/node_modules ./node_modules
++COPY --from=builder --chown=65532:65532 /app/package.json ./package.json
++COPY --from=builder --chown=65532:65532 /app/openclaw.mjs ./openclaw.mjs
++
++# Copy gogcli binary
++COPY --from=builder /usr/local/bin/gog /usr/local/bin/gog
++
++# Copy YourClaw security defaults
++COPY --from=builder --chown=65532:65532 /app/yourclaw-patches/security-defaults.json /app/yourclaw-security-defaults.json
++
++# Optionally install Chromium for browser automation
++# Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
++USER root
++ARG OPENCLAW_INSTALL_BROWSER=""
++RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
++      apk update && apk add --no-cache chromium; \
++    fi
++USER 65532
++
++ENV NODE_ENV=production
++ENV HOME=/home/node
++
++# Create state directory
++RUN mkdir -p /home/node/.openclaw
++
++# Bind to loopback by default for security
++CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

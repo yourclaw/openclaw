@@ -17,6 +17,11 @@
       }
     }
   },
+  "skills": {
+    "load": {
+      "extraDirs": ["/home/node/external-skills"]
+    }
+  },
   "gateway": {
     "bind": "loopback"
   },
