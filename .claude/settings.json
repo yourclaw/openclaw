@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(.env.local)",
+      "Read(.env.production)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/credentials/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(~/.openclaw/credentials/**)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Bash(cat .env*)",
+      "Bash(cat **/.env*)",
+      "Bash(head .env*)",
+      "Bash(tail .env*)",
+      "Bash(less .env*)",
+      "Bash(more .env*)",
+      "Bash(grep * .env*)",
+      "Bash(sed * .env*)",
+      "Bash(awk * .env*)",
+      "Bash(source .env*)",
+      "Bash(. .env*)",
+      "Bash(cat *credentials*)",
+      "Bash(cat *.pem)",
+      "Bash(cat *.key)"
+    ]
+  }
+}
