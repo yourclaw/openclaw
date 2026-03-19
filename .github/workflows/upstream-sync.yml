@@ -58,8 +58,8 @@ jobs:
             NEW_TAG="${{ inputs.force_tag }}"
             echo "Forced sync to tag: ${NEW_TAG}"
           else
-            # Find latest stable upstream tag (exclude beta/rc)
-            NEW_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v -E '(beta|rc|alpha)' | head -1)
+            # Find latest stable upstream tag (only match exact vYYYY.M.D format)
+            NEW_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           fi
 
           echo "Latest upstream stable tag: ${NEW_TAG}"
