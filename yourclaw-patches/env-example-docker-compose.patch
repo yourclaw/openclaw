@@ -1,0 +1,26 @@
+diff --git a/.env.example b/.env.example
+index 41df435b8f..2b271b6597 100644
+--- a/.env.example
++++ b/.env.example
+@@ -78,3 +78,21 @@ OPENCLAW_GATEWAY_TOKEN=change-me-to-a-long-random-token
+ # ELEVENLABS_API_KEY=...
+ # XI_API_KEY=...  # alias for ElevenLabs
+ # DEEPGRAM_API_KEY=...
++
++# -----------------------------------------------------------------------------
++# Docker Compose (used by docker-setup.sh)
++# -----------------------------------------------------------------------------
++# OPENCLAW_CONFIG_DIR=~/.openclaw
++# OPENCLAW_WORKSPACE_DIR=~/.openclaw/workspace
++# OPENCLAW_GATEWAY_PORT=18789
++# OPENCLAW_BRIDGE_PORT=18790
++# OPENCLAW_GATEWAY_BIND=lan
++# OPENCLAW_IMAGE=openclaw:local
++# OPENCLAW_DOCKER_APT_PACKAGES=
++# OPENCLAW_HOME_VOLUME=
++
++# Mount an external skills directory into the container.
++# Format: source:target[:options] (comma-separated for multiple)
++# The security-defaults.json overlay configures skills.load.extraDirs
++# to look at /home/node/external-skills inside the container.
++# OPENCLAW_EXTRA_MOUNTS=/path/to/your/skills:/home/node/external-skills:ro

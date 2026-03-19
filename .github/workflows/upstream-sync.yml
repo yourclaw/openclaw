@@ -531,11 +531,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Guard: if the sync branch has no diff vs yourclaw (already up to date),
-          # skip PR creation — GitHub rejects PRs with zero commits between branches.
+          # Guard: if the sync branch has no content diff vs yourclaw (already up to date),
+          # skip PR creation — GitHub rejects PRs with zero content diff between branches.
+          # Note: git rev-list --count can be non-zero (merge commits) even when content
+          # is identical, so we check git diff --stat as the authoritative test.
           REPO="${GITHUB_REPOSITORY}"
-          DIFF_COUNT=$(git rev-list --count "${FORK_BRANCH}..${SYNC_BRANCH}" 2>/dev/null || echo "0")
-          if [ "${DIFF_COUNT}" = "0" ]; then
+          CONTENT_DIFF=$(git diff --stat "${FORK_BRANCH}..${SYNC_BRANCH}" 2>/dev/null || echo "")
+          if [ -z "${CONTENT_DIFF}" ]; then
             echo "✅ yourclaw already contains all changes from ${NEW_TAG} — nothing to PR"
             echo "${NEW_TAG}" > yourclaw-patches/LAST_SYNCED_TAG
             git add yourclaw-patches/LAST_SYNCED_TAG

@@ -21,7 +21,8 @@ This directory contains YourClaw-specific patches applied on top of upstream Ope
 - `dockerfile-oci-labels-and-hardening.patch` — OCI metadata labels, plugin dir permission normalization, CMD docs
 - `dockerfile-chainguard.patch` — Zero-CVE container image based on Chainguard (new file)
 - `security-md-trust-boundaries.patch` — Archive extraction + sub-agent delegation trust boundary docs
-- `claude-deny-secrets.patch` — Claude Code deny rules to block reading .env, credentials, keys
+- `claude-deny-secrets.patch` — Claude Code deny rules to block reading .env, credentials, keys (excludes .env.example)
+- `env-example-docker-compose.patch` — Add Docker Compose and OPENCLAW_EXTRA_MOUNTS vars to .env.example
 
 ### Open contributions welcome
 
