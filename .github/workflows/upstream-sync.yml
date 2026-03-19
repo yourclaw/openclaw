@@ -71,17 +71,16 @@ jobs:
             exit 0
           fi
 
-          # Count commits between tags
-          if [ -n "${LAST_SYNCED}" ]; then
-            COMMIT_COUNT=$(git rev-list --count "${LAST_SYNCED}..${NEW_TAG}" 2>/dev/null || echo "0")
-          else
-            COMMIT_COUNT="unknown"
-          fi
+          # Count commits between the actual fork branch and the new tag.
+          # We use fork-branch..tag (not last-synced-tag..tag) because LAST_SYNCED_TAG
+          # can be stale or manually bumped without the content actually being synced.
+          # This gives the true commit count that will appear in the PR.
+          COMMIT_COUNT=$(git rev-list --count "origin/${FORK_BRANCH}..${NEW_TAG}" 2>/dev/null || echo "unknown")
 
           echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
           echo "has_new_release=true" >> "$GITHUB_OUTPUT"
           echo "commit_count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
-          echo "New release found: ${NEW_TAG} (${COMMIT_COUNT} commits since ${LAST_SYNCED})"
+          echo "New release found: ${NEW_TAG} (${COMMIT_COUNT} commits vs ${FORK_BRANCH}, tag delta since ${LAST_SYNCED})"
 
   clawguard-scan:
     name: ClawGuard security scan
@@ -145,8 +144,15 @@ jobs:
           SCAN_PASSED=true
           ISSUES_FOUND=0
 
-          # Get the diff between tags
-          if [ -n "${LAST_TAG}" ]; then
+          # Get the diff range for scanning.
+          # Use the merge-base between the fork branch and the new tag to find
+          # what's actually new. This is more reliable than LAST_SYNCED_TAG which
+          # can be stale or manually bumped without actual content sync.
+          MERGE_BASE=$(git merge-base "origin/${FORK_BRANCH}" "${NEW_TAG}" 2>/dev/null || echo "")
+          if [ -n "${MERGE_BASE}" ]; then
+            DIFF_RANGE="${MERGE_BASE}..${NEW_TAG}"
+          elif [ -n "${LAST_TAG}" ]; then
+            # Fallback to tag-based range
             DIFF_RANGE="${LAST_TAG}..${NEW_TAG}"
           else
             # First sync — scan last 50 commits
@@ -594,18 +600,21 @@ jobs:
             TITLE="sync: upstream ${NEW_TAG} (manual review required)"
           fi
 
+          # Use branch-to-branch for accurate commit count (tag file can be stale)
+          ACTUAL_COMMITS=$(git rev-list --count "${FORK_BRANCH}..${SYNC_BRANCH}" 2>/dev/null || echo "${COMMIT_COUNT}")
+
           BODY=$(cat <<PREOF
           ## Upstream Sync: ${LAST_TAG} → ${NEW_TAG}
 
-          **Commits:** ${COMMIT_COUNT}
+          **Commits:** ${ACTUAL_COMMITS} (upstream tag has ${COMMIT_COUNT} commits vs ${FORK_BRANCH})
           **Conflicts:** ${HAS_CONFLICTS}
           **Security Scan:** $([ "${SCAN_PASSED}" = "true" ] && echo "✅ Passed" || echo "❌ Issues found")
 
           ${SCAN_SUMMARY}
 
-          ### Upstream Changes
+          ### Upstream Changes (last 30)
           \`\`\`
-          $(git log --oneline "${LAST_TAG}..${NEW_TAG}" 2>/dev/null | head -30 || echo "Unable to list commits")
+          $(git log --oneline "${FORK_BRANCH}..${SYNC_BRANCH}" 2>/dev/null | head -30 || echo "Unable to list commits")
           \`\`\`
 
           ---
